@@ -3,126 +3,115 @@ import pandas as pd
 import sqlite3
 import os
 
-# Configuración de pantalla
-st.set_page_config(page_title="Miami Jobs Explorer", layout="wide")
-
-# --- CONFIGURACIÓN CORREGIDA ---
-# El archivo vive dentro de la carpeta "datos"
-DB_PATH = os.path.join("datos", "miami_jobs.db")
-
-@st.cache_data
-def cargar_datos():
-    # Depuración: Si no existe, avisa dónde está buscando
-    if not os.path.exists(DB_PATH):
-        return None
-    
-    conn = sqlite3.connect(DB_PATH)
-    try:
-        df = pd.read_sql("SELECT * FROM ofertas", conn)
-    except:
-        df = pd.DataFrame()
-    finally:
-        conn.close()
-    return df
-
-st.title("🍎 Miami-Dade Schools: Cloud Visor")
-st.caption("Versión Online Restaurada (v1.50.0)")
-
-df = cargar_datos()
-
-# Si falla, mostramos ayuda visual
-if df is None:
-    st.error(f"❌ ERROR CRÍTICO: No encuentro la base de datos.")
-    st.warning(f"📍 Estoy buscando aquí: `{os.path.abspath(DB_PATH)}`")
-    st.info("💡 Asegúrate de estar ejecutando el comando desde la carpeta 'miami_jobs_app' y que la carpeta 'datos' exista.")
-    st.stop()
-
-if df.empty:
-    st.warning("⚠️ La base de datos se encontró, pero está vacía.")
-    st.stop()
-
-# --- FILTROS LATERALES ---
-with st.sidebar:
-    st.header("🔍 Filtros")
-    busqueda = st.text_input("Buscar cargo o escuela:")
-    
-    if "salario_min" in df.columns:
-        max_val = df["salario_min"].fillna(0).max()
-        if max_val > 0:
-            salario = st.slider("Salario Mínimo ($)", 0, int(max_val), 0, step=1000)
-        else:
-            salario = 0
-    else:
-        salario = 0
-
-# --- LÓGICA DE FILTRADO ---
-df_filtrado = df.copy()
-
-if busqueda:
-    mask = df_filtrado["titulo"].str.contains(busqueda, case=False, na=False) | \
-           df_filtrado["escuela"].str.contains(busqueda, case=False, na=False)
-    df_filtrado = df_filtrado[mask]
-
-if "salario_min" in df.columns:
-    df_filtrado = df_filtrado[df_filtrado["salario_min"] >= salario]
-
-df_filtrado = df_filtrado.reset_index(drop=True)
-
-# --- TABLA PRINCIPAL ---
-column_cfg = {
-    "link_apply_directo": st.column_config.LinkColumn("Acción", display_text="🚀 APLICAR"),
-    "url_oferta": st.column_config.LinkColumn("Original", display_text="🔗 Web"),
-    "salario_min": st.column_config.NumberColumn("Salario Min", format="$%.2f"),
-    "titulo": st.column_config.TextColumn("Cargo", width="large"),
-    "descripcion_html": None, 
-    "ubicacion_raw": None,
-    "pdf_url": None,
-    "req_id": None
-}
-
-evento = st.dataframe(
-    df_filtrado,
-    column_config=column_cfg,
-    use_container_width=True,
-    hide_index=True,
-    selection_mode="single-row",
-    on_select="rerun",
-    height=400
+# --- CONFIGURACIÓN DE PANTALLA ---
+st.set_page_config(
+    page_title="Miami Jobs Map", 
+    layout="wide", 
+    page_icon="🗺️",
+    initial_sidebar_state="collapsed" # Esconde la barra lateral por defecto
 )
 
-# --- DETALLE DE LA OFERTA ---
-st.markdown("---")
-st.header("📄 Detalle de la Oferta")
+# --- ESTILOS CSS PARA APROVECHAR ESPACIO ---
+st.markdown("""
+<style>
+    .block-container {padding-top: 1rem; padding-bottom: 0rem;}
+    h1 {margin-bottom: 0.5rem;}
+</style>
+""", unsafe_allow_html=True)
 
-if df_filtrado.empty:
-    st.warning("No hay ofertas que coincidan con tu búsqueda.")
+# --- 1. BUSCADOR DE BASE DE DATOS ---
+def encontrar_db():
+    posibles = ["datos/miami_jobs.db", "miami_jobs.db", "../datos/miami_jobs.db"]
+    for p in posibles:
+        if os.path.exists(p): return p
+    return None
+
+path = encontrar_db()
+if not path:
+    st.error("❌ No se encuentra el archivo 'miami_jobs.db'.")
     st.stop()
 
-# LÓGICA DE SELECCIÓN AUTOMÁTICA
-# Si el usuario selecciona una fila, usamos esa. Si no, usamos la primera (índice 0).
-if len(evento.selection.rows) > 0:
-    indice_seleccionado = evento.selection.rows[0]
-    fila = df_filtrado.iloc[indice_seleccionado]
+# --- 2. CARGAR DATOS ---
+@st.cache_data
+def get_data(db_path):
+    conn = sqlite3.connect(db_path)
+    # Traemos solo lo que tiene coordenadas
+    query = "SELECT * FROM ofertas WHERE latitud IS NOT NULL AND latitud > 1"
+    df = pd.read_sql(query, conn)
+    conn.close()
+    return df
+
+df = get_data(path)
+
+# Preparar datos para el mapa (Streamlit pide columnas 'lat' y 'lon')
+df = df.rename(columns={'latitud': 'lat', 'longitud': 'lon'})
+
+# --- 3. INTERFAZ: TÍTULO ---
+c_title, c_metric = st.columns([3, 1])
+with c_title:
+    st.title("🗺️ Mapa de Empleos")
+with c_metric:
+    st.metric("Oportunidades", len(df))
+
+# --- 4. MAPA INTERACTIVO (EL PROTAGONISTA) ---
+# on_select="rerun" hace que al hacer clic, el script corra de nuevo y sepamos qué se tocó
+mapa = st.map(
+    df,
+    latitude='lat',
+    longitude='lon',
+    color='#FF4B4B',   # Rojo Streamlit
+    size=60,           # Puntos grandes para fácil clic
+    zoom=10,
+    use_container_width=True,
+    height=450,
+    on_select="rerun"  # <--- LA CLAVE DE LA INTERACTIVIDAD
+)
+
+# --- 5. LOGICA DE SELECCIÓN ---
+# Obtenemos las filas seleccionadas (si hay alguna)
+seleccion = mapa.selection.rows
+
+st.divider()
+
+if len(seleccion) > 0:
+    # --- CASO: USUARIO HIZO CLIC EN UN PUNTO ---
+    idx = seleccion[0]
+    oferta = df.iloc[idx]
+    
+    # Diseño de la tarjeta de detalle
+    col_izq, col_der = st.columns([1, 2])
+    
+    with col_izq:
+        st.subheader("📍 Escuela Seleccionada")
+        st.info(f"**{oferta['escuela']}**")
+        
+        st.write(f"**Cargo:** {oferta['titulo']}")
+        st.write(f"**ID:** {oferta.get('req_id', 'N/A')}")
+        
+        salario = oferta.get('salario_min', 0)
+        st.success(f"💰 **Salario Base:** ${salario:,.2f}")
+        
+        # Botón de acción
+        link = oferta.get("link_apply_directo") or oferta.get("url_oferta")
+        if link:
+            st.link_button("🚀 APLICAR AHORA", link, type="primary", use_container_width=True)
+            
+    with col_der:
+        st.write("📄 **Descripción del Puesto:**")
+        # Caja con scroll para leer cómodo
+        with st.container(height=300, border=True):
+            html = oferta.get("descripcion_html", "No hay detalles disponibles.")
+            st.markdown(html, unsafe_allow_html=True)
+
 else:
-    fila = df_filtrado.iloc[0]
-
-# --- VISUALIZACIÓN DEL DETALLE ---
-c1, c2 = st.columns([1, 2])
-
-with c1:
-    st.info(f"**ID:** {fila.get('req_id', 'N/A')}")
-    st.write(f"**🏢 Escuela:**")
-    st.subheader(fila.get('escuela', 'No especificada'))
+    # --- CASO: NADA SELECCIONADO (ESTADO INICIAL) ---
+    st.info("👆 **Haz clic en cualquier punto rojo del mapa** para ver los detalles de la oferta aquí.")
     
-    sal = fila.get('salario_min', 0)
-    st.success(f"**💰 Salario Base:** ${sal:,.2f}")
-    
-    link = fila.get("link_apply_directo") or fila.get("url_oferta")
-    if link:
-        st.link_button("🚀 Ir a la Postulación Oficial", link, type="primary", use_container_width=True)
-
-with c2:
-    st.write("**Descripción del Puesto:**")
-    desc = fila.get("descripcion_html", "No hay descripción disponible.")
-    with st.container(height=500, border=True):
-        st.markdown(desc, unsafe_allow_html=True)
+    # Mostramos una tabla resumen simple abajo
+    with st.expander("Ver lista completa en tabla"):
+        st.dataframe(
+            df[['escuela', 'titulo', 'salario_min']],
+            column_config={"salario_min": st.column_config.NumberColumn("Salario", format="$%.2f")},
+            use_container_width=True,
+            hide_index=True
+        )
